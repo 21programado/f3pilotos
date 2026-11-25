@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Mando Carrera</title>
+<script src="/static/socket.io.min.js"></script>
+<style>
+  :root { --color:#8a97a8; --cd:100%; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; height:100dvh; background:#080b10; color:#e8edf5; font-family: Bahnschrift, "Segoe UI", system-ui, sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; padding:10px;
+         touch-action:none; user-select:none; -webkit-user-select:none; overflow:hidden; }
+  #titulo { margin:0; font-size:19px; color:var(--color); text-align:center; }
+  #datos { font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; min-height:34px; }
+  #panel { display:flex; gap:10px; width:100%; flex:1; max-height:70dvh; touch-action:none; }
+  .pad { flex:1; display:grid; place-items:center; font-size:64px; color:var(--color); background:#0c121b;
+         border:2px solid var(--color); border-radius:18px; touch-action:none; }
+  .pad.on { background:var(--color); color:#080b10; }
+  #turbo { width:28%; font:inherit; font-size:20px; font-weight:800; border:2px solid var(--color); border-radius:18px; color:#e8edf5;
+           background:linear-gradient(to top, var(--color) var(--cd), #0c121b var(--cd)); touch-action:none; }
+  #turbo.espera { color:#7a8699; }
+  .fila { display:flex; gap:10px; }
+  button.chico { padding:8px 14px; font:inherit; font-size:14px; font-weight:600; border:0; border-radius:10px; background:#1b2533; color:#e8edf5; }
+  button.chico.on { background:#3ddc97; color:#06210f; }
+  #btn-listo { display:none; padding:14px 28px; font:inherit; font-size:19px; font-weight:700; border:0; border-radius:12px; background:#3ddc97; color:#06210f; }
+  #btn-pausa { display:none; padding:10px 22px; font:inherit; font-size:16px; font-weight:700; border:0; border-radius:12px; background:#1b2533; color:#e8edf5; }
+  #aviso { font-size:13px; color:#9aa7b8; min-height:16px; text-align:center; }
+</style>
+</head>
+<body>
+<h2 id="titulo">Conectando…</h2>
+<div id="datos">&nbsp;</div>
+<div id="panel">
+  <div class="pad" id="izq">◀</div>
+  <button id="turbo">TURBO</button>
+  <div class="pad" id="der">▶</div>
+</div>
+<div id="aviso"></div>
+<button id="btn-listo">¡Estoy listo!</button>
+<button id="btn-pausa">Pausar</button>
+<div class="fila">
+  <button class="chico" id="btn-tilt">Inclinar: no</button>
+  <button class="chico" id="btn-inv" style="display:none">Invertir giro</button>
+</div>
+
+<script>
+const socket = io();
+const $ = (id) => document.getElementById(id);
+const root = document.documentElement.style;
+let yo = 0, rolMsg = "", turboEspera = 6, turboHasta = 0;
+let izq = false, der = false, modoTilt = false, invertir = false, tiltV = 0, ultimoDir = 0, fase = "sala";
+
+function poner(color, txt) { root.setProperty("--color", color); $("titulo").textContent = txt; rolMsg = txt; }
+const aviso = (t) => ($("aviso").textContent = t);
+
+socket.on("connect", () => { if (!yo) poner("#8a97a8", "Conectado"); });
+socket.on("disconnect", () => { yo = 0; poner("#8a97a8", "Reconectando…"); });
+socket.on("rol", (d) => {
+  yo = d.jugador; turboEspera = d.turbo_espera;
+  if (yo) poner(d.color, `Sos el auto ${d.nombre.toLowerCase()}`);
+  else poner("#8a97a8", "Sala llena: ya están todos los corredores");
+  $("panel").style.opacity = yo ? 1 : 0.35;
+});
+socket.on("marcador", (m) => {
+  fase = m.fase;
+  const listo = m.listos.includes(yo), espera = yo && m.completa && (m.fase === "sala" || m.fase === "fin");
+  $("btn-listo").style.display = espera && !listo ? "block" : "none";
+  $("btn-listo").textContent = m.fase === "fin" ? "Revancha" : "¡Estoy listo!";
+  $("btn-pausa").style.display = yo && m.fase === "carrera" ? "block" : "none";
+  $("btn-pausa").textContent = m.pausado ? "Reanudar" : "Pausar";
+  $("panel").style.opacity = !yo ? 0.35 : m.pausado ? 0.5 : 1;
+  if (!yo) return;
+  if (m.fase === "fin") {
+    const puesto = m.ranking.indexOf(yo) + 1;
+    $("titulo").textContent = (puesto === 1 ? "¡Ganaste!" : `Llegaste ${puesto}°`) + (listo ? " · esperando al resto…" : "");
+  } else if (espera) $("titulo").textContent = listo ? "Esperando a los demás…" : "Tocá el botón cuando estés listo";
+  else if (m.pausado) $("titulo").textContent = "Juego en pausa";
+  else $("titulo").textContent = rolMsg;
+});
+socket.on("datos", (d) => { $("datos").textContent = d.fin ? `¡Llegaste! · puesto ${d.pos}°` : `Vuelta ${d.vuelta} · puesto ${d.pos}°`; });
+socket.on("pausa", (d) => { $("btn-pausa").textContent = d.pausado ? "Reanudar" : "Pausar"; });
+socket.on("sonido", (d) => {
+  if (d.r !== yo) return;
+  const v = { bache: [60, 40, 60], aceite: [120], cono: [25], choque: [35], muro: [20], turbo: [50], meta: [80, 60, 80] }[d.tipo];
+  if (v) navigator.vibrate?.(v);
+});
+$("btn-listo").onclick = () => socket.emit("listo");
+$("btn-pausa").onclick = () => socket.emit("pausar");
+
+// ---------- Volante: mitades izquierda/derecha (o inclinación del celular) ----------
+function enviarDir() {
+  const v = modoTilt ? tiltV : (der ? 1 : 0) - (izq ? 1 : 0);
+  if (v !== ultimoDir) { ultimoDir = v; socket.emit("volante", { v }); }
+}
+function pad(el, poner) {
+  el.addEventListener("pointerdown", (e) => { el.setPointerCapture(e.pointerId); poner(true); el.classList.add("on"); enviarDir(); navigator.wakeLock?.request("screen").catch(() => {}); });
+  ["pointerup", "pointercancel"].forEach((ev) => el.addEventListener(ev, () => { poner(false); el.classList.remove("on"); enviarDir(); }));
+}
+pad($("izq"), (b) => (izq = b));
+pad($("der"), (b) => (der = b));
+document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+// ---------- Turbo con tiempo de espera ----------
+const turbo = $("turbo");
+turbo.addEventListener("pointerdown", () => {
+  if (performance.now() < turboHasta) return;
+  socket.emit("turbo");
+  turboHasta = performance.now() + turboEspera * 1000;
+  navigator.vibrate?.(40);
+});
+setInterval(() => {
+  const resta = Math.max(0, turboHasta - performance.now());
+  root.setProperty("--cd", (resta ? 100 - (resta / (turboEspera * 1000)) * 100 : 100) + "%");
+  turbo.classList.toggle("espera", resta > 0);
+}, 100);
+
+// ---------- Inclinación (experimental): requiere que el navegador dé acceso al sensor ----------
+let manejador = null;
+function apagarTilt() {
+  if (manejador) window.removeEventListener("devicemotion", manejador);
+  manejador = null; modoTilt = false; tiltV = 0; enviarDir();
+  $("btn-tilt").textContent = "Inclinar: no"; $("btn-tilt").classList.remove("on"); $("btn-inv").style.display = "none";
+}
+async function encenderTilt() {
+  const ios = typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function";
+  try { if (ios && (await DeviceMotionEvent.requestPermission()) !== "granted") throw 0; }
+  catch { aviso("No se dio permiso al sensor. Usá los botones."); return; }
+  let recibido = false;
+  manejador = (e) => {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    recibido = true;
+    const s = ios ? -1 : 1, ang = (screen.orientation && screen.orientation.angle != null) ? screen.orientation.angle : (window.orientation || 0);
+    const x = s * a.x, y = s * a.y;
+    const [sx, sy] = ang === 90 ? [-y, x] : ang === 270 || ang === -90 ? [y, -x] : ang === 180 ? [-x, -y] : [x, y];
+    let deg = sy < 2 ? 0 : -Math.atan2(sx, sy) * 180 / Math.PI;  // celular parado, como un volante
+    if (invertir) deg = -deg;
+    tiltV = Math.abs(deg) < 4 ? 0 : Math.round(Math.max(-1, Math.min(1, deg / 30)) * 20) / 20;
+    enviarDir();
+  };
+  window.addEventListener("devicemotion", manejador);
+  modoTilt = true; aviso("");
+  $("btn-tilt").textContent = "Inclinar: sí"; $("btn-tilt").classList.add("on"); $("btn-inv").style.display = "inline-block";
+  setTimeout(() => { if (!recibido) { apagarTilt(); aviso("El navegador no da acceso al sensor en esta conexión (http). Usá los botones."); } }, 1500);
+}
+$("btn-tilt").onclick = () => (modoTilt ? apagarTilt() : encenderTilt());
+$("btn-inv").onclick = () => (invertir = !invertir);
+</script>
+</body>
+</html>

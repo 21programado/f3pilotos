@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Carrera TV</title>
+<script src="/static/socket.io.min.js"></script>
+<style>
+  :root { --ok:#3ddc97; --bg:#080b10; }
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; overflow:hidden; background:var(--bg); color:#e8edf5;
+         font-family: Bahnschrift, "Segoe UI", system-ui, sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; }
+  #estado { font-size:clamp(14px, 2.4vh, 22px); text-align:center; color:var(--ok); min-height:1.4em; }
+  canvas { width:min(94vw, calc((100vh - 120px) * 1.5)); aspect-ratio:3/2; background:#0a0e14; border-radius:10px; box-shadow:0 0 0 2px #1d2735, 0 20px 50px rgba(0,0,0,.6); }
+  #barra { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+  button { padding:8px 16px; font:inherit; font-size:15px; font-weight:600; border:0; border-radius:8px; cursor:pointer; background:#1b2533; color:#e8edf5; }
+  button:hover { background:#27344a; }
+  button:focus-visible { outline:3px solid var(--ok); outline-offset:2px; }
+  button.on { background:var(--ok); color:#06210f; }
+  #btn-nueva { display:none; background:var(--ok); color:#06210f; }
+</style>
+</head>
+<body>
+<div id="estado">Esperando corredores (0/4)</div>
+<canvas id="pista" width="1200" height="800"></canvas>
+<div id="barra">
+  <button id="btn-audio" class="on">Sonido: sí (M)</button>
+  <button id="btn-pausa">Pausa (P)</button>
+  <button id="btn-nueva">Nueva carrera (R)</button>
+  <button id="btn-full">Pantalla completa (F)</button>
+</div>
+
+<script>
+const socket = io({ query: { tipo: "tv" } });
+const $ = (id) => document.getElementById(id);
+const cv = $("pista"), ctx = cv.getContext("2d");
+const W = 900, H = 600, CX = 450, CY = 300, X0 = 250, X1 = 650, RC = 150;
+const COLORES = { 1: "#ff4d4d", 2: "#2bb8ff", 3: "#ffd23f", 4: "#3ddc97" };
+let E = null, urlMando = "", estelas = {}, shake = 0, yaT = 0, urlOk = false;
+
+// ---------- Sonido (Web Audio, sin archivos) ----------
+let audio = null, sonido = true;
+function iniciarAudio() {
+  if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+  if (audio.state === "suspended") audio.resume();
+}
+["click", "keydown", "touchstart"].forEach((ev) => document.addEventListener(ev, iniciarAudio));
+function tono(f, dur, tipo = "square", delay = 0, vol = 0.12, hasta = null) {
+  if (!sonido || !audio) return;
+  const t = audio.currentTime + delay, o = audio.createOscillator(), g = audio.createGain();
+  o.type = tipo; o.frequency.setValueAtTime(f, t);
+  if (hasta) o.frequency.exponentialRampToValueAtTime(hasta, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(audio.destination); o.start(t); o.stop(t + dur);
+}
+socket.on("sonido", (d) => {
+  const t = d.tipo;
+  if (t === "cuenta") tono(440, 0.12, "sine", 0, 0.15);
+  else if (t === "saque") { tono(880, 0.4, "sine", 0, 0.16); yaT = 1; }
+  else if (t === "bache") { tono(120, 0.2, "sawtooth", 0, 0.18, 55); shake = 6; }
+  else if (t === "aceite") tono(900, 0.5, "sine", 0, 0.12, 180);
+  else if (t === "cono") tono(260, 0.07, "square");
+  else if (t === "choque") { tono(150, 0.09, "square", 0, 0.12); shake = 3; }
+  else if (t === "muro") tono(180, 0.06, "triangle");
+  else if (t === "turbo") tono(300, 0.45, "sawtooth", 0, 0.1, 900);
+  else if (t === "meta") [660, 880].forEach((f, i) => tono(f, 0.15, "square", i * 0.12));
+  else if (t === "victoria") [440, 554, 659, 880].forEach((f, i) => tono(f, i === 3 ? 0.5 : 0.12, "square", 0.3 + i * 0.13));
+});
+function alternarSonido() {
+  iniciarAudio(); sonido = !sonido;
+  $("btn-audio").textContent = sonido ? "Sonido: sí (M)" : "Sonido: no (M)";
+  $("btn-audio").classList.toggle("on", sonido);
+  tono(520, 0.08);
+}
+$("btn-audio").onclick = alternarSonido;
+
+// ---------- Controles ----------
+const pausar = () => socket.emit("pausar");
+const nueva = () => socket.emit("nueva");
+$("btn-pausa").onclick = pausar;
+$("btn-nueva").onclick = nueva;
+$("btn-full").onclick = () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+document.addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase();
+  if (k === "m") alternarSonido(); else if (k === "p") pausar(); else if (k === "r") nueva(); else if (k === "f") $("btn-full").click();
+});
+
+// ---------- Eventos del servidor ----------
+socket.on("info", (d) => (urlMando = d.url));
+socket.on("estado_sala", (d) => { $("estado").textContent = d.msg; $("estado").style.color = "var(--ok)"; });
+socket.on("actualizar_tv", (e) => {
+  E = e;
+  const bp = $("btn-pausa"), t = e.pausado ? "Reanudar (P)" : "Pausa (P)";
+  if (bp.textContent !== t) bp.textContent = t;
+  bp.classList.toggle("on", !!e.pausado);
+  $("btn-nueva").style.display = e.completa && (e.fase === "fin" || e.pausado) ? "inline-block" : "none";
+});
+
+// ---------- Dibujo (60 fps, independiente de los mensajes) ----------
+function texto(t, x, y, size, color, alpha = 1) {
+  ctx.globalAlpha = alpha; ctx.fillStyle = color;
+  ctx.font = `700 ${size}px Bahnschrift, "Segoe UI", system-ui, sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(t, x, y); ctx.globalAlpha = 1;
+}
+const rr = (x, y, w, h, r) => { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); };
+
+function dibujarPista() {
+  ctx.fillStyle = "#0e1a15"; rr(160, 210, 580, 180, 90); ctx.fill();            // interior
+  ctx.lineWidth = 120; ctx.strokeStyle = "#e8edf5"; rr(X0 - RC, CY - RC, X1 - X0 + 2 * RC, 2 * RC, RC); ctx.stroke();   // pianos
+  ctx.strokeStyle = "#e0342f"; ctx.setLineDash([16, 16]); ctx.stroke(); ctx.setLineDash([]);
+  ctx.lineWidth = 108; ctx.strokeStyle = "#262e3b"; ctx.stroke();                // asfalto
+  ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.setLineDash([14, 16]); ctx.stroke(); ctx.setLineDash([]);
+  for (let i = 0; i < 18; i++) for (let j = 0; j < 2; j++) {  // línea de meta a cuadros
+    ctx.fillStyle = (i + j) % 2 ? "#e8edf5" : "#10151d"; ctx.fillRect(447 + j * 6, 96 + i * 6, 6, 6);
+  }
+}
+function dibujarObstaculos(o) {
+  o.baches.forEach((b) => {
+    ctx.fillStyle = "#0a0d12"; ctx.strokeStyle = "#445066"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(b.x, b.y, 15, 12, 0.4, 0, 7); ctx.fill(); ctx.stroke();
+    ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(b.x - 9, b.y - 3); ctx.lineTo(b.x - 2, b.y + 1); ctx.lineTo(b.x + 4, b.y - 4); ctx.lineTo(b.x + 10, b.y + 3); ctx.stroke();
+  });
+  o.aceites.forEach((a) => {
+    ctx.fillStyle = "#170d2b"; ctx.beginPath(); ctx.ellipse(a.x, a.y, 19, 14, -0.3, 0, 7); ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = "rgba(130,90,255,.6)"; ctx.beginPath(); ctx.arc(a.x - 3, a.y - 1, 8, 3.5, 5.6); ctx.stroke();
+    ctx.strokeStyle = "rgba(0,210,255,.5)"; ctx.beginPath(); ctx.arc(a.x + 4, a.y + 2, 6, 0.4, 2.4); ctx.stroke();
+  });
+  o.conos.forEach((k) => {
+    ctx.globalAlpha = k.caido > 0 ? 0.3 : 1;
+    ctx.fillStyle = "#ff7a18"; ctx.beginPath(); ctx.arc(k.x, k.y, k.caido > 0 ? 5 : 7.5, 0, 7); ctx.fill();
+    if (!k.caido) { ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(k.x, k.y, 4.2, 0, 7); ctx.fill(); ctx.fillStyle = "#ff7a18"; ctx.beginPath(); ctx.arc(k.x, k.y, 1.8, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+  });
+}
+function dibujarAuto(c) {
+  const col = COLORES[c.r];
+  const tr = (estelas[c.r] = estelas[c.r] || []);
+  if (E.fase === "carrera" && E.cuenta === 0 && !E.pausado && c.v > 0.3) { tr.push([c.x, c.y]); if (tr.length > 16) tr.shift(); } else if (tr.length) tr.shift();
+  tr.forEach(([x, y], i) => { ctx.globalAlpha = (i / tr.length) * 0.28; ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, 4 * (i / tr.length) + 1, 0, 7); ctx.fill(); });
+  ctx.globalAlpha = 1;
+  ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.a);
+  if (c.turbo_t > 0) { ctx.fillStyle = "#ffb03a"; ctx.beginPath(); ctx.moveTo(-11, -4); ctx.lineTo(-20 - Math.random() * 10, 0); ctx.lineTo(-11, 4); ctx.fill(); }
+  ctx.shadowColor = col; ctx.shadowBlur = 12; ctx.fillStyle = col; rr(-11, -6, 22, 12, 3); ctx.fill(); ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(-3, -4.5, 8, 9);
+  ctx.fillStyle = "#fff"; ctx.fillRect(9, -5, 2, 3); ctx.fillRect(9, 2, 2, 3);
+  ctx.restore();
+  if (c.bache_t > 0) {  // estrellitas de "mareado"
+    const t = performance.now() / 120;
+    for (let i = 0; i < 3; i++) { ctx.fillStyle = "#ffe066"; ctx.beginPath(); ctx.arc(c.x + Math.cos(t + i * 2.1) * 13, c.y - 12 + Math.sin(t + i * 2.1) * 4, 2.2, 0, 7); ctx.fill(); }
+  }
+}
+function tablero() {
+  const orden = [...E.autos].sort((a, b) => a.pos - b.pos);
+  const m = Math.floor(E.t_carrera / 60), s = (E.t_carrera % 60).toFixed(1).padStart(4, "0");
+  texto(`${m}:${s}`, CX, 236, 17, "#9aa7b8");
+  orden.forEach((c, i) => {
+    const y = 268 + i * 29, col = COLORES[c.r];
+    texto(`${c.pos}°  ${E.nombres[c.r]}`, CX - 55, y, 21, col);
+    texto(c.fin !== null ? "META" : `V ${c.vuelta}/${E.vueltas}`, CX + 95, y, 19, c.fin !== null ? "#fff" : "#9aa7b8");
+  });
+}
+function listaRoles(modoListo) {
+  [1, 2, 3, 4].forEach((r, i) => {
+    const x = i % 2 ? 540 : 360, y = 330 + Math.floor(i / 2) * 30;
+    const marca = modoListo ? (E.listos.includes(r) ? "✓ listo" : "…") : (E.conectados.includes(r) ? "● conectado" : "○ libre");
+    texto(`${E.nombres[r]}: ${marca}`, x, y, 16, COLORES[r]);
+  });
+}
+function dibujar() {
+  requestAnimationFrame(dibujar);
+  ctx.setTransform(1200 / W, 0, 0, 1200 / W, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (!E) return;
+  ctx.save();
+  if (shake > 0.3) { ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake); shake *= 0.82; }
+  dibujarPista();
+  dibujarObstaculos(E.obst);
+  E.autos.forEach(dibujarAuto);
+
+  if (E.fase === "sala") {
+    if (E.completa) {
+      texto("¡Preparados!", CX, 245, 30, "#e8edf5");
+      texto("Cada corredor toca «Estoy listo» en su celular", CX, 282, 14, "#9aa7b8");
+      listaRoles(true);
+    } else {
+      texto("Esperando corredores", CX, 240, 26, "#e8edf5");
+      texto("Entrá desde el celular a", CX, 272, 14, "#9aa7b8");
+      texto(urlMando, CX, 298, 21, "#3ddc97");
+      listaRoles(false);
+    }
+  } else if (E.fase === "carrera") {
+    if (E.cuenta > 0 && !E.pausado) {
+      ctx.fillStyle = "rgba(8,11,16,.35)"; ctx.fillRect(0, 0, W, H);
+      texto(Math.ceil(E.cuenta), CX, CY, 150, "#fff", Math.min(1, (E.cuenta % 1) + 0.35));
+    } else {
+      if (yaT > 0) { texto("¡YA!", CX, CY, 130, "#3ddc97", Math.min(1, yaT * 1.5)); yaT -= 0.02; }
+      else tablero();
+    }
+  } else if (E.fase === "fin") {
+    ctx.fillStyle = "rgba(8,11,16,.78)"; ctx.fillRect(0, 0, W, H);
+    texto(`¡Ganó el ${E.nombres[E.ranking[0]]}!`, CX, 150, 52, COLORES[E.ranking[0]]);
+    E.ranking.forEach((r, i) => {
+      const c = E.autos.find((a) => a.r === r);
+      texto(`${i + 1}°  ${E.nombres[r]}`, CX - 90, 235 + i * 46, 30, COLORES[r]);
+      texto(c.fin !== null ? `${c.fin.toFixed(1)} s` : "no llegó", CX + 120, 235 + i * 46, 26, "#c8d2e0");
+    });
+    texto(E.listos.length ? `Listos para la revancha: ${E.listos.length}/${E.ranking.length}` : "Todos tocan «Revancha» en su celular", CX, 470, 17, "#9aa7b8");
+  }
+  if (E.pausado) {
+    ctx.fillStyle = "rgba(8,11,16,.72)"; ctx.fillRect(0, 0, W, H);
+    texto("PAUSA", CX, CY - 15, 70, "#e8edf5");
+    texto("Se reanuda desde un celular o con la tecla P", CX, CY + 40, 18, "#9aa7b8");
+  }
+  ctx.restore();
+}
+dibujar();
+</script>
+</body>
+</html>
